@@ -1,0 +1,18 @@
+name: yolov5-gpu
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch>=2.0      # neuer PyTorch mit CUDA‑Unterstützung
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8 # CUDA‑Toolkit passend für RTX 4080
+  - cudnn
+  - ultralytics       # YOLO‑Support via conda :contentReference[oaicite:1]{index=1}
+  - opencv            # OpenCV (GUI‑Variante)
+  - pip
+  - pip:
+      - yolov5        # YOLOv5 direkt via pip (älteres Format)
