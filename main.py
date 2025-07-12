@@ -5,11 +5,12 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 from ultralytics import YOLO
+from tqdm import tqdm
 
 # === Konfiguration ===
 CONFIG = {
-    'source_folder': "/home/hans/wallpaper/gallery-dl-bak/",
-    'target_folder': "/home/hans/wallpaper/aussortiert/",  # Ordner für unerwünschte Bilder
+    'source_folder': "/home/hans/wallpaper/gallery-dl-sort/",
+    'target_folder': "/home/hans/wallpaper/discarded/",  # Ordner für unerwünschte Bilder
     'model_path': "yolov8s.pt",  # vortrainiertes YOLOv8-Modell
     'device': 0,
     'target_classes': ['car', 'person', 'motorcycle'],  # Zielklassen: Autos und erkennbare Personen
@@ -144,7 +145,7 @@ def show_decision_gui(img, boxes, labels, confidences, filename):
     
     def on_window_close():
         """Handler für das Schließen des Fensters über X - beendet das gesamte Skript"""
-        print("\n🛑 Skript durch Benutzer beendet - aktuelle Datei wird nicht verschoben")
+        tqdm.write("\n🛑 Skript durch Benutzer beendet - aktuelle Datei wird nicht verschoben")
         root.destroy()
         exit(0)  # Beendet das gesamte Skript sofort
     
@@ -195,6 +196,7 @@ stats = {
     'processed_files': 0,
     'auto_sorted': 0,
     'manual_decisions': 0,
+    'manual_sorted': 0,  # Aus manuellen Entscheidungen aussortiert
     'kept_files': 0,
     'errors': 0
 }
@@ -204,34 +206,48 @@ print(f"📁 Aussortier-Ordner: {target_folder}")
 print(f"🎯 Suche nach: {', '.join(target_classes)}")
 print("=" * 60)
 
-# === Bilder durchgehen (rekursiv durch alle Unterordner) ===
+# === Sammle alle Bilddateien ===
+print("📊 Sammle Bilddateien...")
+all_image_files = []
 for root, dirs, files in os.walk(source_folder):
     for filename in files:
-        if not filename.lower().endswith(CONFIG['supported_extensions']):
-            continue
+        if filename.lower().endswith(CONFIG['supported_extensions']):
+            all_image_files.append((root, filename))
 
+print(f"✅ {len(all_image_files)} Bilddateien gefunden")
+print("=" * 60)
+
+# === Bilder durchgehen mit Progress Bar ===
+with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bild") as pbar:
+    for root, filename in all_image_files:
         stats['total_files'] += 1
         relative_path = os.path.relpath(os.path.join(root, filename), source_folder)
         
-        if stats['total_files'] % 10 == 0:
-            print(f"📊 Verarbeitet: {stats['processed_files']}/{stats['total_files']} Dateien")
+        # Progress Bar Update
+        pbar.set_postfix({
+            'Aktuell': relative_path[:30] + '...' if len(relative_path) > 30 else relative_path,
+            'Aussortiert': stats['auto_sorted'],
+            'Entscheidungen': stats['manual_decisions']
+        })
 
         image_path = os.path.join(root, filename)
         img = cv2.imread(image_path)
         if img is None:
-            print(f"⚠️ Kann {relative_path} nicht laden - überspringe")
+            tqdm.write(f"⚠️ Kann {relative_path} nicht laden - überspringe")
             stats['errors'] += 1
+            pbar.update(1)
             continue
 
         try:
             results = model.predict(img, device=device, verbose=False)
         except Exception as e:
-            print(f"❌ Fehler bei YOLO-Vorhersage für {relative_path}: {e}")
+            tqdm.write(f"❌ Fehler bei YOLO-Vorhersage für {relative_path}: {e}")
             stats['errors'] += 1
+            pbar.update(1)
             continue
             
         stats['processed_files'] += 1
-            
+        
         detected_objects = []
         needs_manual_decision = False
         
@@ -247,7 +263,7 @@ for root, dirs, files in os.walk(source_folder):
                 
                 # Überspringe Erkennungen mit zu niedrigem Confidence-Score
                 if confidence < min_confidence:
-                    print(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence})")
+                    tqdm.write(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence})")
                     continue
                 
                 # Nur relevante Klassen berücksichtigen
@@ -261,14 +277,14 @@ for root, dirs, files in os.walk(source_folder):
                         detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
                     elif object_area <= max_uncertainty_area and confidence < max_uncertainty_confidence:
                         # Kleines Objekt UND niedriger Score → ignorieren (behalten)
-                        print(f"{class_name} ignoriert (zu klein und unsicher): area={int(object_area)}, conf={confidence:.2f}")
+                        tqdm.write(f"{class_name} ignoriert (zu klein und unsicher): area={int(object_area)}, conf={confidence:.2f}")
                     elif object_area <= max_uncertainty_area or confidence < max_uncertainty_confidence:
                         # Entweder klein ODER unsicher (aber nicht beides) → nachfragen
                         needs_manual_decision = True
-                        print(f"🤔 Unsicheres {class_name} erkannt in {filename} (area: {int(object_area)}, confidence: {confidence:.2f})")
+                        tqdm.write(f"🤔 Unsicheres {class_name} erkannt in {filename} (area: {int(object_area)}, confidence: {confidence:.2f})")
                     else:
                         # Mittlere Größe mit mittlerem Score → ignorieren
-                        print(f"{class_name} erkannt, aber mittlere Größe/Score: area={int(object_area)}, conf={confidence:.2f}")
+                        tqdm.write(f"{class_name} erkannt, aber mittlere Größe/Score: area={int(object_area)}, conf={confidence:.2f}")
 
         # Entscheidung treffen
         should_sort_out = False
@@ -277,7 +293,7 @@ for root, dirs, files in os.walk(source_folder):
             # Sichere Erkennung vorhanden - automatisch aussortieren (auch wenn zusätzlich unsichere Erkennungen da sind)
             should_sort_out = True
             stats['auto_sorted'] += 1
-            print(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {detected_objects}")
+            tqdm.write(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {detected_objects}")
         elif needs_manual_decision:
             # Nur unsichere Erkennungen - GUI für manuelle Entscheidung zeigen
             # Wenn keep_file() aufgerufen wird, wird result['keep'] = True gesetzt
@@ -286,6 +302,7 @@ for root, dirs, files in os.walk(source_folder):
             user_wants_to_keep = show_decision_gui(img, boxes, labels, confidences, relative_path)
             should_sort_out = not user_wants_to_keep  # Umkehrung!
             if should_sort_out:
+                stats['manual_sorted'] += 1
                 detected_objects.append('manual_decision_sort_out')
 
         if should_sort_out:
@@ -300,21 +317,24 @@ for root, dirs, files in os.walk(source_folder):
                 shutil.move(image_path, target_path)
                 # Erstelle clickbaren Link mit file:// URI
                 file_uri = f"file://{target_path.replace(' ', '%20')}"
-                print(f"🗑️ {relative_path} aussortiert (gefunden: {detected_objects})")
-                print(f"📁 {file_uri}")
-                print()
+                tqdm.write(f"🗑️ {relative_path} aussortiert (gefunden: {detected_objects})")
+                tqdm.write(f"📁 {file_uri}")
+                tqdm.write("")
             except Exception as e:
-                print(f"❌ Fehler beim Verschieben von {relative_path}: {e}")
+                tqdm.write(f"❌ Fehler beim Verschieben von {relative_path}: {e}")
                 stats['errors'] += 1
-                print()
+                tqdm.write("")
         elif needs_manual_decision:
-            print(f"✅ {relative_path} behalten (manuelle Entscheidung)")
+            tqdm.write(f"✅ {relative_path} behalten (manuelle Entscheidung)")
             stats['kept_files'] += 1
-            print()
+            tqdm.write("")
         else:
             # Keine Erkennungen - Bild bleibt im Quellordner
-            print(f"✅ {relative_path} behalten (keine relevanten Objekte erkannt)")
+            tqdm.write(f"✅ {relative_path} behalten (keine relevanten Objekte erkannt)")
             stats['kept_files'] += 1
+        
+        # Progress Bar Update
+        pbar.update(1)
 
 # === Abschluss-Statistik ===
 print("\n" + "=" * 60)
@@ -324,8 +344,10 @@ print(f"📁 Gefundene Dateien: {stats['total_files']}")
 print(f"✅ Erfolgreich verarbeitet: {stats['processed_files']}")
 print(f"🔒 Automatisch aussortiert: {stats['auto_sorted']}")
 print(f"🤔 Manuelle Entscheidungen: {stats['manual_decisions']}")
-print(f"💾 Behalten: {stats['kept_files']}")
+print(f"   └─ �️ Manuell aussortiert: {stats['manual_sorted']}")
+print(f"   └─ 💾 Manuell behalten: {stats['manual_decisions'] - stats['manual_sorted']}")
+print(f"💾 Behalten gesamt: {stats['kept_files']}")
 print(f"❌ Fehler: {stats['errors']}")
-print(f"🗑️ Aussortiert gesamt: {stats['auto_sorted'] + stats['manual_decisions'] - stats['kept_files']}")
+print(f"🗑️ Aussortiert gesamt: {stats['auto_sorted'] + stats['manual_sorted']}")
 print("=" * 60)
 print("✨ Verarbeitung abgeschlossen!")
