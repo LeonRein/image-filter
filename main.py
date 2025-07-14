@@ -285,7 +285,6 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
                     else:
                         # Mittlere Confidence ODER mittlere Größe → nachfragen
                         needs_manual_decision = True
-                        detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
                         tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
 
         # Entscheidung treffen
