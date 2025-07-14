@@ -10,6 +10,58 @@ import sqlite3
 import json
 import hashlib
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Optional, List, Tuple
+
+from dataclasses import dataclass
+from typing import Optional, List, Tuple
+
+# === Data Classes for Simplified Function Signatures ===
+
+@dataclass
+class FileInfo:
+    """Container for file processing information."""
+    relative_path: str
+    absolute_path: str
+    size: int
+    mtime: float
+    width: int = 0
+    height: int = 0
+
+@dataclass
+class DetectionResult:
+    """Container for YOLO detection results."""
+    boxes: Optional[object] = None
+    labels: Optional[object] = None
+    confidences: Optional[object] = None
+    has_error: bool = False
+    discard_reasons: List[str] = None
+    needs_manual_decision: bool = False
+    
+    def __post_init__(self):
+        if self.discard_reasons is None:
+            self.discard_reasons = []
+
+@dataclass 
+class ProcessingStats:
+    """Container for processing statistics."""
+    total_files: int = 0
+    processed_files: int = 0
+    cached_files: int = 0
+    auto_sorted: int = 0
+    manual_decisions: int = 0
+    manual_sorted: int = 0
+    kept_files: int = 0
+    errors: int = 0
+
+@dataclass
+class ProcessingContext:
+    """Container for processing context and configuration."""
+    source_folder: str
+    target_folder: str
+    db_path: str
+    stats: ProcessingStats
+    pbar: object
 
 # === Konfiguration ===
 CONFIG = {
@@ -139,20 +191,16 @@ def init_database():
         # Rekursiver Aufruf für neue Datenbank
         return init_database()
 
-def is_file_processed(db_path, file_path, file_size, file_mtime):
+def is_file_processed(db_path: str, file_info: FileInfo) -> Optional[Tuple[str, str]]:
     """
     Prüft ob eine Datei bereits mit der aktuellen Konfiguration verarbeitet wurde.
     
     Args:
-        db_path (str): Pfad zur SQLite-Datenbank
-        file_path (str): Relativer Pfad der zu prüfenden Datei
-        file_size (int): Dateigröße in Bytes für Konsistenzprüfung
-        file_mtime (float): Änderungszeitpunkt der Datei als Unix-Timestamp
+        db_path: Pfad zur SQLite-Datenbank
+        file_info: FileInfo Objekt mit Datei-Metadaten
     
     Returns:
-        tuple or None: (decision, discard_reasons_json) wenn gefunden, sonst None
-            - decision (str): 'kept' oder 'sorted_out'
-            - discard_reasons_json (str): JSON-String der Aussortierungs-Gründe
+        Optional[Tuple]: (decision, discard_reasons_json) wenn gefunden, sonst None
     """
     try:
         conn = sqlite3.connect(db_path)
@@ -163,7 +211,7 @@ def is_file_processed(db_path, file_path, file_size, file_mtime):
         cursor.execute('''
             SELECT decision, discard_reasons FROM processed_files 
             WHERE file_path = ? AND config_hash = ? AND file_size = ? AND file_mtime = ?
-        ''', (file_path, current_hash, file_size, file_mtime))
+        ''', (file_info.relative_path, current_hash, file_info.size, file_info.mtime))
         
         result = cursor.fetchone()
         conn.close()
@@ -173,20 +221,15 @@ def is_file_processed(db_path, file_path, file_size, file_mtime):
         print(f"⚠️ Fehler beim Cache-Zugriff: {e}")
         return None
 
-def save_file_result(db_path, file_path, file_size, file_mtime, decision, discard_reasons):
+def save_file_result(db_path: str, file_info: FileInfo, decision: str, discard_reasons: List[str]):
     """
     Speichert das Verarbeitungsergebnis einer Datei in der Datenbank.
     
     Args:
-        db_path (str): Pfad zur SQLite-Datenbank
-        file_path (str): Relativer Pfad der verarbeiteten Datei
-        file_size (int): Dateigröße in Bytes
-        file_mtime (float): Änderungszeitpunkt als Unix-Timestamp
-        decision (str): Entscheidung ('kept' oder 'sorted_out')
-        discard_reasons (list): Liste der Gründe für Aussortierung
-    
-    Returns:
-        None: Speichert Daten in Datenbank, keine Rückgabe
+        db_path: Pfad zur SQLite-Datenbank
+        file_info: FileInfo Objekt mit Datei-Metadaten
+        decision: Entscheidung ('kept' oder 'sorted_out')
+        discard_reasons: Liste der Gründe für Aussortierung
     """
     try:
         conn = sqlite3.connect(db_path)
@@ -199,66 +242,57 @@ def save_file_result(db_path, file_path, file_size, file_mtime, decision, discar
             INSERT OR REPLACE INTO processed_files 
             (file_path, config_hash, file_size, file_mtime, decision, discard_reasons, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (file_path, current_hash, file_size, file_mtime, decision, json.dumps(discard_reasons), datetime.now()))
+        ''', (file_info.relative_path, current_hash, file_info.size, file_info.mtime, decision, json.dumps(discard_reasons), datetime.now()))
         
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"⚠️ Fehler beim Speichern in Cache: {e}")
 
-def show_decision_gui(img, boxes, labels, confidences, filename):
+def show_decision_gui(img, detection_result: DetectionResult, filename: str) -> bool:
     """
     Zeigt eine grafische Benutzeroberfläche für manuelle Entscheidungen bei unsicheren Erkennungen.
     
-    Erstellt ein Tkinter-Fenster mit dem Bild und markierten unsicheren Objekten. Der Benutzer
-    kann zwischen "BEHALTEN" und "AUSSORTIEREN" wählen. Das Fenster ist responsiv und passt
-    sich an verschiedene Bildschirmgrößen an.
-    
     Args:
-        img (numpy.ndarray): OpenCV Bild-Array für die Anzeige
-        boxes (numpy.ndarray): Bounding Box Koordinaten der Erkennungen
-        labels (numpy.ndarray): Klassen-IDs der erkannten Objekte  
-        confidences (numpy.ndarray): Confidence-Scores der Erkennungen
-        filename (str): Name der Datei für Fenstertitel
+        img: OpenCV Bild-Array für die Anzeige
+        detection_result: DetectionResult Objekt mit YOLO-Erkennungen
+        filename: Name der Datei für Fenstertitel
     
     Returns:
         bool: True wenn Benutzer "BEHALTEN" wählt, False bei "AUSSORTIEREN"
-    
-    Note:
-        - Filtert automatisch nur unsichere Erkennungen für die Anzeige
-        - Fenster schließen über X beendet das gesamte Skript
-        - Unterstützt dynamische Fenstergrößenänderungen
     """
     
     # Filtere nur unsichere Erkennungen für die Anzeige
     uncertain_indices = []
-    for i, cls_id in enumerate(labels):
-        class_name = model.names[int(cls_id)]
-        confidence = confidences[i]
-        x1, y1, x2, y2 = boxes[i]
-        object_area = (x2 - x1) * (y2 - y1)
-        
-        # Filtere Objekte, die eine manuelle Entscheidung benötigen
-        if (class_name in target_classes and 
-            confidence >= min_confidence_threshold and
-            ((min_confidence_threshold <= confidence < max_confidence_threshold) or 
-             (small_area_threshold < object_area < large_area_threshold))):
-            uncertain_indices.append(i)
+    if detection_result.boxes is not None:
+        for i, cls_id in enumerate(detection_result.labels):
+            class_name = model.names[int(cls_id)]
+            confidence = detection_result.confidences[i]
+            x1, y1, x2, y2 = detection_result.boxes[i]
+            object_area = (x2 - x1) * (y2 - y1)
+            
+            # Filtere Objekte, die eine manuelle Entscheidung benötigen
+            if (class_name in target_classes and 
+                confidence >= min_confidence_threshold and
+                ((min_confidence_threshold <= confidence < max_confidence_threshold) or 
+                 (small_area_threshold < object_area < large_area_threshold))):
+                uncertain_indices.append(i)
     
     # Zeichne nur unsichere Bounding Boxes auf das Bild
     img_display = img.copy()
-    for i in uncertain_indices:
-        x1, y1, x2, y2 = boxes[i].astype(int)
-        confidence = confidences[i]
-        class_name = model.names[int(labels[i])]
-        area = (x2 - x1) * (y2 - y1)
-        
-        # Orange für unsichere Objekte
-        color = (0, 127, 255)  # Orange
+    if detection_result.boxes is not None:
+        for i in uncertain_indices:
+            x1, y1, x2, y2 = detection_result.boxes[i].astype(int)
+            confidence = detection_result.confidences[i]
+            class_name = model.names[int(detection_result.labels[i])]
+            area = (x2 - x1) * (y2 - y1)
             
-        cv2.rectangle(img_display, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(img_display, f'{class_name} ({int(area)}) {confidence:.2f}', 
-                   (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # Orange für unsichere Objekte
+            color = (0, 127, 255)  # Orange
+                
+            cv2.rectangle(img_display, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img_display, f'{class_name} ({int(area)}) {confidence:.2f}', 
+                       (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     
     # Tkinter GUI erstellen
     root = tk.Tk()
@@ -426,26 +460,23 @@ def show_cache_stats(db_path):
     except Exception as e:
         print(f"⚠️ Fehler beim Lesen der Cache-Statistiken: {e}")
 
-def check_image_basic_criteria(img_width, img_height):
+def check_image_basic_criteria(file_info: FileInfo) -> Tuple[List[str], bool]:
     """
     Prüft Grundkriterien wie Auflösung und Seitenverhältnis eines Bildes.
     
     Args:
-        img_width (int): Breite des Bildes in Pixeln
-        img_height (int): Höhe des Bildes in Pixeln
+        file_info: FileInfo Objekt mit Bildabmessungen
     
     Returns:
-        tuple: (discard_reasons, should_sort_out)
-            - discard_reasons (list): Liste der Gründe für Aussortierung
-            - should_sort_out (bool): True wenn Bild aussortiert werden soll
+        Tuple[List[str], bool]: (discard_reasons, should_sort_out)
     """
-    img_aspect_ratio = img_width / img_height
+    img_aspect_ratio = file_info.width / file_info.height
     discard_reasons = []
     
     # Prüfe Mindestauflösung
-    if img_width < min_resolution[0] or img_height < min_resolution[1]:
-        discard_reasons.append(f'low_resolution({img_width}x{img_height})')
-        tqdm.write(f"❌ Zu kleine Auflösung aussortiert: {img_width}x{img_height} < {min_resolution[0]}x{min_resolution[1]}")
+    if file_info.width < min_resolution[0] or file_info.height < min_resolution[1]:
+        discard_reasons.append(f'low_resolution({file_info.width}x{file_info.height})')
+        tqdm.write(f"❌ Zu kleine Auflösung aussortiert: {file_info.width}x{file_info.height} < {min_resolution[0]}x{min_resolution[1]}")
         return discard_reasons, True  # should_sort_out = True
     
     # Prüfe Seitenverhältnis
@@ -456,40 +487,34 @@ def check_image_basic_criteria(img_width, img_height):
     
     return discard_reasons, False  # should_sort_out = False
 
-def analyze_yolo_detections(img, relative_path):
+def analyze_yolo_detections(img, file_info: FileInfo) -> DetectionResult:
     """
     Führt YOLO-Analyse durch und bestimmt Aktionen basierend auf Erkennungen.
     
     Args:
-        img (numpy.ndarray): OpenCV Bild-Array für YOLO-Analyse
-        relative_path (str): Relativer Pfad der Bilddatei für Logging
+        img: OpenCV Bild-Array für YOLO-Analyse
+        file_info: FileInfo Objekt mit Datei-Metadaten
     
     Returns:
-        tuple: (boxes, labels, confidences, has_error, discard_reasons, needs_manual_decision)
-            - boxes (numpy.ndarray or None): Bounding Box Koordinaten der Erkennungen
-            - labels (numpy.ndarray or None): Klassen-IDs der erkannten Objekte
-            - confidences (numpy.ndarray or None): Confidence-Scores der Erkennungen
-            - has_error (bool): True wenn ein Fehler bei der YOLO-Analyse aufgetreten ist
-            - discard_reasons (list): Liste der Gründe für automatisches Aussortieren
-            - needs_manual_decision (bool): True wenn manuelle Benutzerentscheidung nötig ist
+        DetectionResult: Objekt mit allen Erkennungsdaten und Entscheidungshilfen
     """
+    result = DetectionResult()
+    
     try:
-        results = model.predict(img, device=device, verbose=False)
+        yolo_results = model.predict(img, device=device, verbose=False)
     except Exception as e:
-        tqdm.write(f"❌ Fehler bei YOLO-Vorhersage für {relative_path}: {e}")
-        return None, None, None, True  # Fehler - als Error behandeln
+        tqdm.write(f"❌ Fehler bei YOLO-Vorhersage für {file_info.relative_path}: {e}")
+        result.has_error = True
+        return result
     
-    discard_reasons = []
-    needs_manual_decision = False
-    
-    if len(results[0].boxes) > 0:
-        labels = results[0].boxes.cls.cpu().numpy()
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        confidences = results[0].boxes.conf.cpu().numpy()
+    if len(yolo_results[0].boxes) > 0:
+        result.labels = yolo_results[0].boxes.cls.cpu().numpy()
+        result.boxes = yolo_results[0].boxes.xyxy.cpu().numpy()
+        result.confidences = yolo_results[0].boxes.conf.cpu().numpy()
         
-        for i, cls_id in enumerate(labels):
+        for i, cls_id in enumerate(result.labels):
             class_name = model.names[int(cls_id)]
-            confidence = confidences[i]
+            confidence = result.confidences[i]
             
             # Überspringe Erkennungen mit zu niedrigem Confidence-Score
             if confidence < min_confidence_threshold:
@@ -498,12 +523,12 @@ def analyze_yolo_detections(img, relative_path):
             
             # Nur relevante Klassen berücksichtigen
             if class_name in target_classes:
-                x1, y1, x2, y2 = boxes[i]
+                x1, y1, x2, y2 = result.boxes[i]
                 object_area = (x2 - x1) * (y2 - y1)
                 
                 if object_area >= large_area_threshold and confidence >= max_confidence_threshold:
                     # Großes Objekt UND hohe Confidence → automatisch aussortieren
-                    discard_reasons.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
+                    result.discard_reasons.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
                     tqdm.write(f"🔒 Große {class_name} mit hoher Confidence aussortiert: area={int(object_area)}, conf={confidence:.2f}")
                 elif object_area <= small_area_threshold:
                     # Kleines Objekt → automatisch behalten
@@ -513,217 +538,187 @@ def analyze_yolo_detections(img, relative_path):
                     tqdm.write(f"✅ {class_name} behalten (niedrige Confidence): area={int(object_area)}, conf={confidence:.2f}")
                 else:
                     # Mittlere Confidence ODER mittlere Größe → nachfragen
-                    needs_manual_decision = True
+                    result.needs_manual_decision = True
                     tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
-        
-        return boxes, labels, confidences, False, discard_reasons, needs_manual_decision
     
-    return None, None, None, False, discard_reasons, needs_manual_decision
+    return result
 
-def make_decision(discard_reasons, needs_manual_decision, img, boxes, labels, confidences, relative_path, stats):
+def make_decision(basic_discard_reasons: List[str], detection_result: DetectionResult, img, file_info: FileInfo, stats: ProcessingStats) -> Tuple[bool, List[str]]:
     """
     Trifft die endgültige Entscheidung basierend auf Analyse-Ergebnissen.
     
     Args:
-        discard_reasons (list): Bereits gefundene Gründe für Aussortierung
-        needs_manual_decision (bool): Ob eine manuelle Benutzerentscheidung erforderlich ist
-        img (numpy.ndarray): OpenCV Bild-Array für GUI-Anzeige
-        boxes (numpy.ndarray or None): Bounding Box Koordinaten für GUI
-        labels (numpy.ndarray or None): Klassen-IDs für GUI
-        confidences (numpy.ndarray or None): Confidence-Scores für GUI
-        relative_path (str): Relativer Pfad für GUI-Titel und Logging
-        stats (dict): Statistik-Dictionary das aktualisiert wird
+        basic_discard_reasons: Bereits gefundene Gründe für Aussortierung (aus Grundkriterien)
+        detection_result: DetectionResult mit YOLO-Erkennungen
+        img: OpenCV Bild-Array für GUI-Anzeige
+        file_info: FileInfo Objekt mit Datei-Metadaten
+        stats: ProcessingStats Objekt das aktualisiert wird
     
     Returns:
-        tuple: (should_sort_out, discard_reasons)
-            - should_sort_out (bool): True wenn Datei aussortiert werden soll
-            - discard_reasons (list): Erweiterte Liste der Aussortierungs-Gründe
+        Tuple[bool, List[str]]: (should_sort_out, all_discard_reasons)
     """
     should_sort_out = False
+    all_discard_reasons = basic_discard_reasons + detection_result.discard_reasons
     
-    if discard_reasons:
+    if detection_result.discard_reasons:
         # Sichere Erkennung vorhanden - automatisch aussortieren
         should_sort_out = True
-        stats['auto_sorted'] += 1
-        tqdm.write(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {discard_reasons}")
-    elif needs_manual_decision:
+        stats.auto_sorted += 1
+        tqdm.write(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {detection_result.discard_reasons}")
+    elif detection_result.needs_manual_decision:
         # Nur unsichere Erkennungen - GUI für manuelle Entscheidung zeigen
-        stats['manual_decisions'] += 1
-        user_wants_to_keep = show_decision_gui(img, boxes, labels, confidences, relative_path)
+        stats.manual_decisions += 1
+        user_wants_to_keep = show_decision_gui(img, detection_result, file_info.relative_path)
         should_sort_out = not user_wants_to_keep
         if should_sort_out:
-            stats['manual_sorted'] += 1
-            discard_reasons.append('manual_decision_sort_out')
+            stats.manual_sorted += 1
+            all_discard_reasons.append('manual_decision_sort_out')
     
-    return should_sort_out, discard_reasons
+    return should_sort_out, all_discard_reasons
 
-def process_file_movement(should_sort_out, relative_path, image_path, target_folder, discard_reasons, from_cache, needs_manual_decision, stats):
+def process_file_movement(should_sort_out: bool, file_info: FileInfo, target_folder: str, discard_reasons: List[str], from_cache: bool, needs_manual_decision: bool, stats: ProcessingStats):
     """
     Verarbeitet das Verschieben oder Behalten von Dateien basierend auf der Entscheidung.
     
     Args:
-        should_sort_out (bool): True wenn Datei aussortiert werden soll
-        relative_path (str): Relativer Pfad der Datei für Logging
-        image_path (str): Absoluter Pfad zur Quelldatei
-        target_folder (str): Zielordner für aussortierte Dateien
-        discard_reasons (list): Gründe für die Aussortierung
-        from_cache (bool): True wenn Entscheidung aus Cache stammt
-        needs_manual_decision (bool): True wenn manuelle Entscheidung getroffen wurde
-        stats (dict): Statistik-Dictionary das aktualisiert wird
-    
-    Returns:
-        None: Funktion hat keine Rückgabewerte, aktualisiert nur Dateisystem und stats
+        should_sort_out: True wenn Datei aussortiert werden soll
+        file_info: FileInfo Objekt mit Datei-Metadaten
+        target_folder: Zielordner für aussortierte Dateien
+        discard_reasons: Gründe für die Aussortierung
+        from_cache: True wenn Entscheidung aus Cache stammt
+        needs_manual_decision: True wenn manuelle Entscheidung getroffen wurde
+        stats: ProcessingStats Objekt das aktualisiert wird
     """
     if should_sort_out:
         # Verschiebe unerwünschte Bilder in den Aussortier-Ordner
-        target_path = os.path.join(target_folder, relative_path)
+        target_path = os.path.join(target_folder, file_info.relative_path)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         
         try:
-            shutil.move(image_path, target_path)
+            shutil.move(file_info.absolute_path, target_path)
             file_uri = f"file://{target_path.replace(' ', '%20')}"
             
             if from_cache:
-                tqdm.write(f"🔄 {relative_path} erneut aussortiert (Cache)")
-                stats['auto_sorted'] += 1
+                tqdm.write(f"🔄 {file_info.relative_path} erneut aussortiert (Cache)")
+                stats.auto_sorted += 1
             else:
-                tqdm.write(f"🗑️ {relative_path} aussortiert (gefunden: {discard_reasons})")
+                tqdm.write(f"🗑️ {file_info.relative_path} aussortiert (gefunden: {discard_reasons})")
                 tqdm.write(f"📁 {file_uri}")
                 tqdm.write("")
         except Exception as e:
-            tqdm.write(f"❌ Fehler beim Verschieben von {relative_path}: {e}")
-            stats['errors'] += 1
+            tqdm.write(f"❌ Fehler beim Verschieben von {file_info.relative_path}: {e}")
+            stats.errors += 1
             tqdm.write("")
     else:
         # Datei behalten
         if not from_cache:
             if needs_manual_decision:
-                tqdm.write(f"✅ {relative_path} behalten (manuelle Entscheidung)")
+                tqdm.write(f"✅ {file_info.relative_path} behalten (manuelle Entscheidung)")
             else:
-                tqdm.write(f"✅ {relative_path} behalten (keine relevanten Objekte erkannt)")
-            stats['kept_files'] += 1
+                tqdm.write(f"✅ {file_info.relative_path} behalten (keine relevanten Objekte erkannt)")
+            stats.kept_files += 1
 
-def process_single_image(root, filename, source_folder, target_folder, db_path, stats, pbar):
+def process_single_image(root: str, filename: str, context: ProcessingContext):
     """
     Verarbeitet eine einzelne Bilddatei komplett von Cache-Prüfung bis zur finalen Entscheidung.
     
     Args:
-        root (str): Wurzelverzeichnis in dem sich die Datei befindet
-        filename (str): Name der Bilddatei
-        source_folder (str): Absoluter Pfad zum Quellordner
-        target_folder (str): Absoluter Pfad zum Zielordner für aussortierte Dateien
-        db_path (str): Pfad zur SQLite-Datenbank für Caching
-        stats (dict): Statistik-Dictionary das aktualisiert wird
-        pbar (tqdm): Progress Bar Objekt für Fortschrittsanzeige
-    
-    Returns:
-        None: Funktion hat keine Rückgabewerte, verarbeitet Datei vollständig
-    
-    Note:
-        Diese Funktion orchestriert den gesamten Verarbeitungsprozess:
-        1. Cache-Prüfung
-        2. Grundkriterien-Validierung  
-        3. YOLO-Analyse
-        4. Entscheidungsfindung
-        5. Datei-Verarbeitung
-        6. Datenbank-Update
+        root: Wurzelverzeichnis in dem sich die Datei befindet
+        filename: Name der Bilddatei
+        context: ProcessingContext mit allen notwendigen Verarbeitungsparametern
     """
-    relative_path = os.path.relpath(os.path.join(root, filename), source_folder)
-    image_path = os.path.join(root, filename)
+    # FileInfo Objekt erstellen
+    file_info = FileInfo(
+        relative_path=os.path.relpath(os.path.join(root, filename), context.source_folder),
+        absolute_path=os.path.join(root, filename),
+        size=0,
+        mtime=0
+    )
     
     # Progress Bar Update
-    pbar.set_postfix({
-        'Aktuell': relative_path[:30] + '...' if len(relative_path) > 30 else relative_path,
-        'Cache': stats['cached_files'],
-        'Aussortiert': stats['auto_sorted'],
-        'Entscheidungen': stats['manual_decisions']
+    context.pbar.set_postfix({
+        'Aktuell': file_info.relative_path[:30] + '...' if len(file_info.relative_path) > 30 else file_info.relative_path,
+        'Cache': context.stats.cached_files,
+        'Aussortiert': context.stats.auto_sorted,
+        'Entscheidungen': context.stats.manual_decisions
     })
     
     # === CACHE-PRÜFUNG ===
     try:
-        file_stat = os.stat(image_path)
-        file_size = file_stat.st_size
-        file_mtime = file_stat.st_mtime
+        file_stat = os.stat(file_info.absolute_path)
+        file_info.size = file_stat.st_size
+        file_info.mtime = file_stat.st_mtime
         
-        cached_result = is_file_processed(db_path, relative_path, file_size, file_mtime)
+        cached_result = is_file_processed(context.db_path, file_info)
         if cached_result:
             decision, discard_reasons_json = cached_result
             discard_reasons = json.loads(discard_reasons_json) if discard_reasons_json else []
             
-            stats['cached_files'] += 1
+            context.stats.cached_files += 1
             should_sort_out = (decision == 'sorted_out')
             
             if should_sort_out:
-                tqdm.write(f"🔄 {relative_path} wird aussortiert (Cache)")
+                tqdm.write(f"🔄 {file_info.relative_path} wird aussortiert (Cache)")
             else:
-                tqdm.write(f"💾 {relative_path} behalten (Cache)")
-                stats['kept_files'] += 1
+                tqdm.write(f"💾 {file_info.relative_path} behalten (Cache)")
+                context.stats.kept_files += 1
                 return  # Frühes Return für gecachte "behalten" Entscheidungen
             
             # Verarbeite gecachte "aussortieren" Entscheidung
-            process_file_movement(should_sort_out, relative_path, image_path, target_folder, discard_reasons, True, False, stats)
+            process_file_movement(should_sort_out, file_info, context.target_folder, discard_reasons, True, False, context.stats)
             return
             
     except Exception as e:
-        tqdm.write(f"⚠️ Cache-Fehler für {relative_path}: {e}")
+        tqdm.write(f"⚠️ Cache-Fehler für {file_info.relative_path}: {e}")
     
     # === NEUE VERARBEITUNG ===
-    img = cv2.imread(image_path)
+    img = cv2.imread(file_info.absolute_path)
     if img is None:
-        tqdm.write(f"⚠️ Kann {relative_path} nicht laden - überspringe")
-        stats['errors'] += 1
+        tqdm.write(f"⚠️ Kann {file_info.relative_path} nicht laden - überspringe")
+        context.stats.errors += 1
         return
     
-    stats['processed_files'] += 1
+    context.stats.processed_files += 1
     img_height, img_width = img.shape[:2]
+    file_info.width = img_width
+    file_info.height = img_height
     
     # Prüfe Grundkriterien (Auflösung, Seitenverhältnis)
-    discard_reasons, should_sort_out = check_image_basic_criteria(img_width, img_height)
+    basic_discard_reasons, should_sort_out = check_image_basic_criteria(file_info)
     
     if should_sort_out:
         # Grundkriterien nicht erfüllt - direktes Aussortieren
-        stats['auto_sorted'] += 1
-        process_file_movement(should_sort_out, relative_path, image_path, target_folder, discard_reasons, False, False, stats)
-        save_file_result(db_path, relative_path, file_size, file_mtime, 'sorted_out', discard_reasons)
+        context.stats.auto_sorted += 1
+        process_file_movement(should_sort_out, file_info, context.target_folder, basic_discard_reasons, False, False, context.stats)
+        save_file_result(context.db_path, file_info, 'sorted_out', basic_discard_reasons)
         return
     
     # YOLO-Analyse durchführen
-    boxes, labels, confidences, has_error, yolo_discard_reasons, needs_manual_decision = analyze_yolo_detections(img, relative_path)
+    detection_result = analyze_yolo_detections(img, file_info)
     
-    if has_error:
-        stats['errors'] += 1
+    if detection_result.has_error:
+        context.stats.errors += 1
         return
     
-    # Kombiniere Discard-Gründe
-    discard_reasons.extend(yolo_discard_reasons)
-    
     # Entscheidung treffen
-    should_sort_out, discard_reasons = make_decision(discard_reasons, needs_manual_decision, img, boxes, labels, confidences, relative_path, stats)
+    should_sort_out, all_discard_reasons = make_decision(basic_discard_reasons, detection_result, img, file_info, context.stats)
     
     # Datei verarbeiten (verschieben oder behalten)
-    process_file_movement(should_sort_out, relative_path, image_path, target_folder, discard_reasons, False, needs_manual_decision, stats)
+    process_file_movement(should_sort_out, file_info, context.target_folder, all_discard_reasons, False, detection_result.needs_manual_decision, context.stats)
     
     # Ergebnis in Datenbank speichern
     decision = 'sorted_out' if should_sort_out else 'kept'
-    save_file_result(db_path, relative_path, file_size, file_mtime, decision, discard_reasons)
+    save_file_result(context.db_path, file_info, decision, all_discard_reasons)
 
 def main():
     """
     Hauptfunktion für die Bildverarbeitung und -sortierung.
     
-    Orchestriert den gesamten Workflow:
+    Orchestriert den gesamten Workflow mit vereinfachten Datenstrukturen:
     1. Initialisiert Zielordner und Datenbank
     2. Sammelt alle unterstützten Bilddateien aus dem Quellordner
     3. Verarbeitet jede Datei einzeln mit Cache-Optimierung
     4. Zeigt finale Statistiken an
-    
-    Returns:
-        None: Führt komplette Bildverarbeitung durch
-    
-    Note:
-        - Verwendet Multiprocessing-sichere Progress Bar
-        - Statistiken werden kontinuierlich aktualisiert
-        - Alle Fehler werden protokolliert aber blockieren nicht den Fortschritt
     """
     # === Aussortier-Ordner anlegen ===
     os.makedirs(target_folder, exist_ok=True)
@@ -733,16 +728,7 @@ def main():
     show_cache_stats(db_path)
 
     # === Statistiken ===
-    stats = {
-        'total_files': 0,
-        'processed_files': 0,
-        'cached_files': 0,
-        'auto_sorted': 0,
-        'manual_decisions': 0,
-        'manual_sorted': 0,  # Aus manuellen Entscheidungen aussortiert
-        'kept_files': 0,
-        'errors': 0
-    }
+    stats = ProcessingStats()
 
     print(f"🔍 Durchsuche Ordner: {source_folder}")
     print(f"📁 Aussortier-Ordner: {target_folder}")
@@ -762,11 +748,20 @@ def main():
 
     # === Bilder durchgehen mit Progress Bar ===
     with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bild") as pbar:
+        # ProcessingContext erstellen
+        context = ProcessingContext(
+            source_folder=source_folder,
+            target_folder=target_folder,
+            db_path=db_path,
+            stats=stats,
+            pbar=pbar
+        )
+        
         for root, filename in all_image_files:
-            stats['total_files'] += 1
+            stats.total_files += 1
             
-            # Verarbeite einzelne Datei
-            process_single_image(root, filename, source_folder, target_folder, db_path, stats, pbar)
+            # Verarbeite einzelne Datei mit vereinfachter Signatur
+            process_single_image(root, filename, context)
             
             # Progress Bar Update
             pbar.update(1)
@@ -775,16 +770,16 @@ def main():
     print("\n" + "=" * 60)
     print("📊 VERARBEITUNGSSTATISTIK")
     print("=" * 60)
-    print(f"📁 Gefundene Dateien: {stats['total_files']}")
-    print(f"🗄️ Aus Cache geladen: {stats['cached_files']}")
-    print(f"✅ Neu verarbeitet: {stats['processed_files']}")
-    print(f"🔒 Automatisch aussortiert: {stats['auto_sorted']}")
-    print(f"🤔 Manuelle Entscheidungen: {stats['manual_decisions']}")
-    print(f"   └─ 🗑️ Manuell aussortiert: {stats['manual_sorted']}")
-    print(f"   └─ 💾 Manuell behalten: {stats['manual_decisions'] - stats['manual_sorted']}")
-    print(f"💾 Behalten gesamt: {stats['kept_files']}")
-    print(f"❌ Fehler: {stats['errors']}")
-    print(f"🗑️ Aussortiert gesamt: {stats['auto_sorted'] + stats['manual_sorted']}")
+    print(f"📁 Gefundene Dateien: {stats.total_files}")
+    print(f"🗄️ Aus Cache geladen: {stats.cached_files}")
+    print(f"✅ Neu verarbeitet: {stats.processed_files}")
+    print(f"🔒 Automatisch aussortiert: {stats.auto_sorted}")
+    print(f"🤔 Manuelle Entscheidungen: {stats.manual_decisions}")
+    print(f"   └─ 🗑️ Manuell aussortiert: {stats.manual_sorted}")
+    print(f"   └─ 💾 Manuell behalten: {stats.manual_decisions - stats.manual_sorted}")
+    print(f"💾 Behalten gesamt: {stats.kept_files}")
+    print(f"❌ Fehler: {stats.errors}")
+    print(f"🗑️ Aussortiert gesamt: {stats.auto_sorted + stats.manual_sorted}")
     print("=" * 60)
     print(f"💾 Cache-Datei: {os.path.join(source_folder, '.image_filter_cache.db')}")
     print("✨ Verarbeitung abgeschlossen!")
