@@ -9,21 +9,23 @@ from tqdm import tqdm
 
 # === Konfiguration ===
 CONFIG = {
-    'source_folder': "/home/hans/wallpaper/gallery-dl/",
-    'target_folder': "/home/hans/wallpaper/discarded/",  # Ordner für unerwünschte Bilder
+    'source_folder': "~/wallpaper/gallery-dl/",
+    'target_folder': "~/wallpaper/discarded/",  # Ordner für unerwünschte Bilder
     'model_path': "yolov8s.pt",  # vortrainiertes YOLOv8-Modell
     'device': 'cpu',
     'target_classes': ['car', 'person', 'motorcycle'],  # Zielklassen: Autos und erkennbare Personen
-    'large_area_threshold': 300000,  # Mindestfläche für große Objekte (≥200k + hohe Confidence = aussortieren)
+    'large_area_threshold': 200000,  # Mindestfläche für große Objekte (≥200k + hohe Confidence = aussortieren)
     'small_area_threshold': 50000,  # Maximale Fläche für kleine Objekte (≤75k = automatisch behalten)
     'min_confidence_threshold': 0.25,  # Mindest-Confidence-Score (darunter wird ignoriert)
     'max_confidence_threshold': 0.7,  # Maximaler Confidence-Schwelle (≥0.7 bei großen Objekten = aussortieren)
+    'min_resolution': [1920, 1080],  # Mindestauflösung [Breite, Höhe] für Wallpaper
+    'aspect_ratio_tolerance': 0.1,  # Toleranz für Seitenverhältnis-Abweichung
     'supported_extensions': (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
 }
 
 # Extrahiere Konfigurationswerte für Kompatibilität
-source_folder = CONFIG['source_folder']
-target_folder = CONFIG['target_folder']
+source_folder = os.path.expanduser(CONFIG['source_folder'])
+target_folder = os.path.expanduser(CONFIG['target_folder'])
 model_path = CONFIG['model_path']
 device = CONFIG['device']
 target_classes = CONFIG['target_classes']
@@ -31,6 +33,9 @@ large_area_threshold = CONFIG['large_area_threshold']
 small_area_threshold = CONFIG['small_area_threshold']
 min_confidence_threshold = CONFIG['min_confidence_threshold']
 max_confidence_threshold = CONFIG['max_confidence_threshold']
+min_resolution = CONFIG['min_resolution']
+target_aspect_ratio = min_resolution[0] / min_resolution[1]  # Berechne aus der Mindestauflösung
+aspect_ratio_tolerance = CONFIG['aspect_ratio_tolerance']
 
 # === Modell laden ===
 model = YOLO(model_path)
@@ -238,63 +243,77 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
             pbar.update(1)
             continue
 
-        try:
-            results = model.predict(img, device=device, verbose=False)
-        except Exception as e:
-            tqdm.write(f"❌ Fehler bei YOLO-Vorhersage für {relative_path}: {e}")
-            stats['errors'] += 1
-            pbar.update(1)
-            continue
-            
-        stats['processed_files'] += 1
+        # Prüfe Bildauflösung und Seitenverhältnis
+        img_height, img_width = img.shape[:2]
+        img_aspect_ratio = img_width / img_height
         
-        detected_objects = []
+        discard_reasons = []
         needs_manual_decision = False
         
-        # Prüfe auf relevante Objekte
-        if len(results[0].boxes) > 0:
-            labels = results[0].boxes.cls.cpu().numpy()
-            boxes = results[0].boxes.xyxy.cpu().numpy()  # Bounding boxes
-            confidences = results[0].boxes.conf.cpu().numpy()  # Confidence scores
+        # Prüfe Mindestauflösung
+        if img_width < min_resolution[0] or img_height < min_resolution[1]:
+            discard_reasons.append(f'low_resolution({img_width}x{img_height})')
+            tqdm.write(f"� Zu kleine Auflösung aussortiert: {img_width}x{img_height} < {min_resolution[0]}x{min_resolution[1]}")
+        # Prüfe Seitenverhältnis
+        elif abs(img_aspect_ratio - target_aspect_ratio) > aspect_ratio_tolerance:
+            discard_reasons.append(f'wrong_aspect_ratio({img_aspect_ratio:.2f})')
+            tqdm.write(f"� Falsches Seitenverhältnis aussortiert: {img_aspect_ratio:.2f} (erwartet: {target_aspect_ratio:.2f} ±{aspect_ratio_tolerance})")
+        else:
+            # Nur bei qualifizierten Bildern YOLO-Analyse durchführen
+            try:
+                results = model.predict(img, device=device, verbose=False)
+            except Exception as e:
+                tqdm.write(f"❌ Fehler bei YOLO-Vorhersage für {relative_path}: {e}")
+                stats['errors'] += 1
+                pbar.update(1)
+                continue
+                
+            stats['processed_files'] += 1
             
-            for i, cls_id in enumerate(labels):
-                class_name = model.names[int(cls_id)]
-                confidence = confidences[i]
+            # Prüfe auf relevante Objekte
+            if len(results[0].boxes) > 0:
+                labels = results[0].boxes.cls.cpu().numpy()
+                boxes = results[0].boxes.xyxy.cpu().numpy()  # Bounding boxes
+                confidences = results[0].boxes.conf.cpu().numpy()  # Confidence scores
                 
-                # Überspringe Erkennungen mit zu niedrigem Confidence-Score
-                if confidence < min_confidence_threshold:
-                    tqdm.write(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence_threshold})")
-                    continue
-                
-                # Nur relevante Klassen berücksichtigen
-                if class_name in target_classes:
-                    # Prüfe Größe des Objekts (Bounding Box)
-                    x1, y1, x2, y2 = boxes[i]
-                    object_area = (x2 - x1) * (y2 - y1)
+                for i, cls_id in enumerate(labels):
+                    class_name = model.names[int(cls_id)]
+                    confidence = confidences[i]
                     
-                    if object_area >= large_area_threshold and confidence >= max_confidence_threshold:
-                        # Großes Objekt UND hohe Confidence → automatisch aussortieren
-                        detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
-                        tqdm.write(f"🔒 Große {class_name} mit hoher Confidence aussortiert: area={int(object_area)}, conf={confidence:.2f}")
-                    elif object_area <= small_area_threshold:
-                        # Kleines Objekt → automatisch behalten
-                        tqdm.write(f"✅ Kleine {class_name} behalten: area={int(object_area)}, conf={confidence:.2f}")
-                    elif confidence <= min_confidence_threshold:
-                        # Niedrige Confidence → automatisch behalten
-                        tqdm.write(f"✅ {class_name} behalten (niedrige Confidence): area={int(object_area)}, conf={confidence:.2f}")
-                    else:
-                        # Mittlere Confidence ODER mittlere Größe → nachfragen
-                        needs_manual_decision = True
-                        tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
+                    # Überspringe Erkennungen mit zu niedrigem Confidence-Score
+                    if confidence < min_confidence_threshold:
+                        tqdm.write(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence_threshold})")
+                        continue
+                    
+                    # Nur relevante Klassen berücksichtigen
+                    if class_name in target_classes:
+                        # Prüfe Größe des Objekts (Bounding Box)
+                        x1, y1, x2, y2 = boxes[i]
+                        object_area = (x2 - x1) * (y2 - y1)
+                        
+                        if object_area >= large_area_threshold and confidence >= max_confidence_threshold:
+                            # Großes Objekt UND hohe Confidence → automatisch aussortieren
+                            discard_reasons.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
+                            tqdm.write(f"🔒 Große {class_name} mit hoher Confidence aussortiert: area={int(object_area)}, conf={confidence:.2f}")
+                        elif object_area <= small_area_threshold:
+                            # Kleines Objekt → automatisch behalten
+                            tqdm.write(f"✅ Kleine {class_name} behalten: area={int(object_area)}, conf={confidence:.2f}")
+                        elif confidence <= min_confidence_threshold:
+                            # Niedrige Confidence → automatisch behalten
+                            tqdm.write(f"✅ {class_name} behalten (niedrige Confidence): area={int(object_area)}, conf={confidence:.2f}")
+                        else:
+                            # Mittlere Confidence ODER mittlere Größe → nachfragen
+                            needs_manual_decision = True
+                            tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
 
         # Entscheidung treffen
         should_sort_out = False
         
-        if detected_objects:
+        if discard_reasons:
             # Sichere Erkennung vorhanden - automatisch aussortieren (auch wenn zusätzlich unsichere Erkennungen da sind)
             should_sort_out = True
             stats['auto_sorted'] += 1
-            tqdm.write(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {detected_objects}")
+            tqdm.write(f"🔒 Automatisches Aussortieren wegen sicherer Erkennung: {discard_reasons}")
         elif needs_manual_decision:
             # Nur unsichere Erkennungen - GUI für manuelle Entscheidung zeigen
             # Wenn keep_file() aufgerufen wird, wird result['keep'] = True gesetzt
@@ -304,7 +323,7 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
             should_sort_out = not user_wants_to_keep  # Umkehrung!
             if should_sort_out:
                 stats['manual_sorted'] += 1
-                detected_objects.append('manual_decision_sort_out')
+                discard_reasons.append('manual_decision_sort_out')
 
         if should_sort_out:
             # Verschiebe unerwünschte Bilder in den Aussortier-Ordner
@@ -318,7 +337,7 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
                 shutil.move(image_path, target_path)
                 # Erstelle clickbaren Link mit file:// URI
                 file_uri = f"file://{target_path.replace(' ', '%20')}"
-                tqdm.write(f"🗑️ {relative_path} aussortiert (gefunden: {detected_objects})")
+                tqdm.write(f"🗑️ {relative_path} aussortiert (gefunden: {discard_reasons})")
                 tqdm.write(f"📁 {file_uri}")
                 tqdm.write("")
             except Exception as e:
