@@ -14,8 +14,8 @@ CONFIG = {
     'model_path': "yolov8s.pt",  # vortrainiertes YOLOv8-Modell
     'device': 'cpu',
     'target_classes': ['car', 'person', 'motorcycle'],  # Zielklassen: Autos und erkennbare Personen
-    'large_area_threshold': 200000,  # Mindestfläche für große Objekte (≥200k + hohe Confidence = aussortieren)
-    'small_area_threshold': 75000,  # Maximale Fläche für kleine Objekte (≤75k = automatisch behalten)
+    'large_area_threshold': 300000,  # Mindestfläche für große Objekte (≥200k + hohe Confidence = aussortieren)
+    'small_area_threshold': 50000,  # Maximale Fläche für kleine Objekte (≤75k = automatisch behalten)
     'min_confidence_threshold': 0.25,  # Mindest-Confidence-Score (darunter wird ignoriert)
     'max_confidence_threshold': 0.7,  # Maximaler Confidence-Schwelle (≥0.7 bei großen Objekten = aussortieren)
     'supported_extensions': (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
@@ -276,16 +276,17 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
                         # Großes Objekt UND hohe Confidence → automatisch aussortieren
                         detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
                         tqdm.write(f"🔒 Große {class_name} mit hoher Confidence aussortiert: area={int(object_area)}, conf={confidence:.2f}")
-                    elif (min_confidence_threshold <= confidence < max_confidence_threshold) or (small_area_threshold < object_area < large_area_threshold):
-                        # Mittlere Confidence ODER mittlere Größe → nachfragen
-                        needs_manual_decision = True
-                        tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
                     elif object_area <= small_area_threshold:
                         # Kleines Objekt → automatisch behalten
                         tqdm.write(f"✅ Kleine {class_name} behalten: area={int(object_area)}, conf={confidence:.2f}")
+                    elif confidence <= min_confidence_threshold:
+                        # Niedrige Confidence → automatisch behalten
+                        tqdm.write(f"✅ {class_name} behalten (niedrige Confidence): area={int(object_area)}, conf={confidence:.2f}")
                     else:
-                        # Alle anderen Fälle → behalten (z.B. niedrige Confidence)
-                        tqdm.write(f"✅ {class_name} behalten (andere Kriterien): area={int(object_area)}, conf={confidence:.2f}")
+                        # Mittlere Confidence ODER mittlere Größe → nachfragen
+                        needs_manual_decision = True
+                        detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
+                        tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
 
         # Entscheidung treffen
         should_sort_out = False
