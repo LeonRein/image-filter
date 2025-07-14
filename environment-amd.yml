@@ -1,0 +1,16 @@
+name: yolov5-cpu-amd
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch>=2.0       # PyTorch CPU-only version for AMD 4700U
+  - torchvision
+  - torchaudio
+  - cpuonly            # Ensures CPU-only PyTorch installation
+  - ultralytics        # YOLO support via conda
+  - opencv             # OpenCV (CPU version)
+  - pip
+  - pip:
+      - yolov5         # YOLOv5 via pip

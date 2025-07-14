@@ -9,15 +9,15 @@ from tqdm import tqdm
 
 # === Konfiguration ===
 CONFIG = {
-    'source_folder': "/home/hans/wallpaper/gallery-dl-sort/",
+    'source_folder': "/home/hans/wallpaper/gallery-dl/",
     'target_folder': "/home/hans/wallpaper/discarded/",  # Ordner für unerwünschte Bilder
     'model_path': "yolov8s.pt",  # vortrainiertes YOLOv8-Modell
-    'device': 0,
+    'device': 'cpu',
     'target_classes': ['car', 'person', 'motorcycle'],  # Zielklassen: Autos und erkennbare Personen
-    'min_large_area': 300000,  # Mindestfläche für große Objekte (automatisch aussortiert)
-    'max_uncertainty_area': 50000,  # Maximale Fläche für kleine Objekte (bei niedrigem Score ignoriert)
-    'min_confidence': 0.25,  # Mindest-Confidence-Score (automatisch verworfen)
-    'max_uncertainty_confidence': 0.7,  # Maximaler Score für unsichere Erkennungen (GUI zeigen)
+    'large_area_threshold': 200000,  # Mindestfläche für große Objekte (≥200k + hohe Confidence = aussortieren)
+    'small_area_threshold': 75000,  # Maximale Fläche für kleine Objekte (≤75k = automatisch behalten)
+    'min_confidence_threshold': 0.25,  # Mindest-Confidence-Score (darunter wird ignoriert)
+    'max_confidence_threshold': 0.7,  # Maximaler Confidence-Schwelle (≥0.7 bei großen Objekten = aussortieren)
     'supported_extensions': (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
 }
 
@@ -27,10 +27,10 @@ target_folder = CONFIG['target_folder']
 model_path = CONFIG['model_path']
 device = CONFIG['device']
 target_classes = CONFIG['target_classes']
-min_large_area = CONFIG['min_large_area']
-max_uncertainty_area = CONFIG['max_uncertainty_area']
-min_confidence = CONFIG['min_confidence']
-max_uncertainty_confidence = CONFIG['max_uncertainty_confidence']
+large_area_threshold = CONFIG['large_area_threshold']
+small_area_threshold = CONFIG['small_area_threshold']
+min_confidence_threshold = CONFIG['min_confidence_threshold']
+max_confidence_threshold = CONFIG['max_confidence_threshold']
 
 # === Modell laden ===
 model = YOLO(model_path)
@@ -46,11 +46,11 @@ def show_decision_gui(img, boxes, labels, confidences, filename):
         x1, y1, x2, y2 = boxes[i]
         object_area = (x2 - x1) * (y2 - y1)
         
-        # Nur unsichere Erkennungen anzeigen (nicht die bereits automatisch aussortierten)
+        # Filtere Objekte, die eine manuelle Entscheidung benötigen
         if (class_name in target_classes and 
-            confidence >= min_confidence and
-            not (object_area >= min_large_area and confidence >= max_uncertainty_confidence) and
-            not (object_area <= max_uncertainty_area and confidence < max_uncertainty_confidence)):
+            confidence >= min_confidence_threshold and
+            ((min_confidence_threshold <= confidence < max_confidence_threshold) or 
+             (small_area_threshold < object_area < large_area_threshold))):
             uncertain_indices.append(i)
     
     # Zeichne nur unsichere Bounding Boxes auf das Bild
@@ -137,7 +137,7 @@ def show_decision_gui(img, boxes, labels, confidences, filename):
         # Warte 100ms nach letzter Änderung bevor resize
         resize_timer = root.after(100, resize_image)
     
-    info_text = tk.Label(root, text=f"Datei: {filename}\nOrange=unsichere Erkennung\nZahlen: (Fläche) Confidence-Score\n\nNur unsichere Erkennungen werden angezeigt - sichere wurden bereits automatisch aussortiert", 
+    info_text = tk.Label(root, text=f"Datei: {filename}\nOrange=manuelle Entscheidung nötig\nZahlen: (Fläche) Confidence-Score\n\nAngezeigt: mittlere Confidence ({min_confidence_threshold:.2f}-{max_confidence_threshold:.2f}) oder mittlere Objektgröße ({small_area_threshold//1000}k-{large_area_threshold//1000}k)", 
                         font=("Arial", 10))
     info_text.pack(pady=5)
     
@@ -262,8 +262,8 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
                 confidence = confidences[i]
                 
                 # Überspringe Erkennungen mit zu niedrigem Confidence-Score
-                if confidence < min_confidence:
-                    tqdm.write(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence})")
+                if confidence < min_confidence_threshold:
+                    tqdm.write(f"Erkennung übersprungen: {class_name} (confidence: {confidence:.2f} < {min_confidence_threshold})")
                     continue
                 
                 # Nur relevante Klassen berücksichtigen
@@ -272,19 +272,20 @@ with tqdm(total=len(all_image_files), desc="🖼️ Verarbeite Bilder", unit="Bi
                     x1, y1, x2, y2 = boxes[i]
                     object_area = (x2 - x1) * (y2 - y1)
                     
-                    if object_area >= min_large_area and confidence >= max_uncertainty_confidence:
-                        # Großes Objekt mit hohem Confidence → aussortieren
+                    if object_area >= large_area_threshold and confidence >= max_confidence_threshold:
+                        # Großes Objekt UND hohe Confidence → automatisch aussortieren
                         detected_objects.append(f'{class_name}(area:{int(object_area)},conf:{confidence:.2f})')
-                    elif object_area <= max_uncertainty_area and confidence < max_uncertainty_confidence:
-                        # Kleines Objekt UND niedriger Score → ignorieren (behalten)
-                        tqdm.write(f"{class_name} ignoriert (zu klein und unsicher): area={int(object_area)}, conf={confidence:.2f}")
-                    elif object_area <= max_uncertainty_area or confidence < max_uncertainty_confidence:
-                        # Entweder klein ODER unsicher (aber nicht beides) → nachfragen
+                        tqdm.write(f"🔒 Große {class_name} mit hoher Confidence aussortiert: area={int(object_area)}, conf={confidence:.2f}")
+                    elif (min_confidence_threshold <= confidence < max_confidence_threshold) or (small_area_threshold < object_area < large_area_threshold):
+                        # Mittlere Confidence ODER mittlere Größe → nachfragen
                         needs_manual_decision = True
-                        tqdm.write(f"🤔 Unsicheres {class_name} erkannt in {filename} (area: {int(object_area)}, confidence: {confidence:.2f})")
+                        tqdm.write(f"🤔 {class_name} - Entscheidung nötig: area={int(object_area)}, conf={confidence:.2f}")
+                    elif object_area <= small_area_threshold:
+                        # Kleines Objekt → automatisch behalten
+                        tqdm.write(f"✅ Kleine {class_name} behalten: area={int(object_area)}, conf={confidence:.2f}")
                     else:
-                        # Mittlere Größe mit mittlerem Score → ignorieren
-                        tqdm.write(f"{class_name} erkannt, aber mittlere Größe/Score: area={int(object_area)}, conf={confidence:.2f}")
+                        # Alle anderen Fälle → behalten (z.B. niedrige Confidence)
+                        tqdm.write(f"✅ {class_name} behalten (andere Kriterien): area={int(object_area)}, conf={confidence:.2f}")
 
         # Entscheidung treffen
         should_sort_out = False
