@@ -11,6 +11,3 @@ dependencies:
   - cpuonly            # Ensures CPU-only PyTorch installation
   - ultralytics        # YOLO support via conda
   - opencv             # OpenCV (CPU version)
-  - pip
-  - pip:
-      - yolov5         # YOLOv5 via pip

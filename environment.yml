@@ -13,6 +13,3 @@ dependencies:
   - cudnn
   - ultralytics       # YOLO‑Support via conda :contentReference[oaicite:1]{index=1}
   - opencv            # OpenCV (GUI‑Variante)
-  - pip
-  - pip:
-      - yolov5        # YOLOv5 direkt via pip (älteres Format)
